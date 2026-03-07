@@ -1,8 +1,6 @@
 import requests
 
 import encryption
-
-
 class LoginConnector:
     """
     Client connector for interacting with the auth service.
