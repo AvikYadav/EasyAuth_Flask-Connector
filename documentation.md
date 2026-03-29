@@ -13,13 +13,13 @@ The decorators in `easyauth_flask.py` ( covered in README.md ) cover most use ca
 Every decorator in `easyauth_flask.py` uses a single shared instance of this class internally. When you import `connector` directly, you're getting that same instance.
 
 ```python
-from Flask.easyauth_flask import connector
+from easyauth_flask import connector
 ```
 
 Or instantiate your own:
 
 ```python
-from base.easyAuthBaseConnector import LoginConnector
+from _connector import LoginConnector
 
 connector = LoginConnector(
     username="your_username",
@@ -249,7 +249,7 @@ raw_jwt = connector.decrypt_token(token)
 
 ```python
 from flask import Flask, request, jsonify
-from base.easyAuthBaseConnector import LoginConnector
+from _connector import LoginConnector
 
 app = Flask(__name__)
 

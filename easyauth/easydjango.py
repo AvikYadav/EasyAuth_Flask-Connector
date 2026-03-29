@@ -1,17 +1,39 @@
+import inspect
 from functools import wraps
 from django.http import JsonResponse
 from django.shortcuts import redirect
-from base.easyAuthBaseConnector import LoginConnector
+from easyauth._config import get_connector
 
 
-# ── Initialise your connector once ────────────────────────────────────────────
 
-connector = LoginConnector(
-    username     = "your_username",
-    service_name = "your_service_name",
-    api_key      = "your_api_key",
-    base_url     = "https://easy-auth.dev",   # or http://127.0.0.1:5000 for local
-)
+
+
+# ── Signature guard ───────────────────────────────────────────────────────────
+
+def _assert_params(func, required: list[str], decorator_name: str):
+    """
+    Raises a clear TypeError at decoration time if `func` is missing any of
+    the parameter names that the decorator will inject at request time.
+
+    Django views always take `request` as their first positional arg, which is
+    NOT in `required` — only the extra injected kwargs need to be checked.
+
+    Args:
+        func           : The view function being decorated.
+        required       : Parameter names the decorator will inject.
+        decorator_name : Name used in the error message.
+    """
+    actual  = inspect.signature(func).parameters
+    missing = [p for p in required if p not in actual]
+    if missing:
+        missing_str = ", ".join(missing)
+        params_str  = ", ".join(["request"] + required)
+        raise TypeError(
+            f"\n\n  @{decorator_name} on '{func.__name__}' is missing required parameter(s): {missing_str}\n"
+            f"  Fix: add them to your function signature.\n\n"
+            f"  def {func.__name__}({params_str}):\n"
+            f"      ..."
+        )
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -50,6 +72,16 @@ def _attach_cookie(response, token):
     return response
 
 
+def _clear_cookie(response):
+    """Removes the auth_token cookie by expiring it immediately."""
+    response.delete_cookie(
+        "auth_token",
+        samesite = "Strict",
+        path     = "/",
+    )
+    return response
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # FUNCTION-BASED VIEW DECORATORS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -77,6 +109,8 @@ def login_required(view_func):
         def dashboard(request, token):
             return JsonResponse({"token": token})
     """
+    _assert_params(view_func, ["token"], "login_required")
+
     @wraps(view_func)
     def wrapped(request, *args, **kwargs):
         token, from_url = _resolve_token(request)
@@ -84,7 +118,7 @@ def login_required(view_func):
         if not token:
             return JsonResponse({"error": "No token provided."}, status=401)
 
-        result = connector.verify_user_login(token)
+        result = get_connector().verify_user_login(token)
 
         if result is None:
             return JsonResponse({"error": "Invalid or expired token."}, status=401)
@@ -117,6 +151,8 @@ def login_required_redirect(redirect_url="/login"):
             return render(request, "dashboard.html")
     """
     def decorator(view_func):
+        _assert_params(view_func, ["token"], "login_required_redirect")
+
         @wraps(view_func)
         def wrapped(request, *args, **kwargs):
             token, from_url = _resolve_token(request)
@@ -124,7 +160,7 @@ def login_required_redirect(redirect_url="/login"):
             if not token:
                 return redirect(redirect_url)
 
-            result = connector.verify_user_login(token)
+            result = get_connector().verify_user_login(token)
 
             if result is None:
                 return redirect(redirect_url)
@@ -161,6 +197,8 @@ def fetch_user_data(view_func):
         def profile(request, username, user_data, token):
             return JsonResponse({"username": username, "data": user_data})
     """
+    _assert_params(view_func, ["token", "username", "user_data"], "fetch_user_data")
+
     @wraps(view_func)
     def wrapped(request, *args, **kwargs):
         token, from_url = _resolve_token(request)
@@ -168,7 +206,7 @@ def fetch_user_data(view_func):
         if not token:
             return JsonResponse({"error": "No token provided."}, status=401)
 
-        result = connector.get_user_data(token)
+        result = get_connector().get_user_data(token)
 
         if result is None:
             return JsonResponse({"error": "Invalid or expired token."}, status=401)
@@ -200,11 +238,45 @@ def fetch_user_data(view_func):
     return wrapped
 
 
+# ── 4. @logout ────────────────────────────────────────────────────────────────
+
+def logout(view_func):
+    """
+    Decorator for function-based views.
+    Clears the auth_token cookie from the response if one is present.
+    The decorated view still executes normally — this decorator only handles
+    the cookie side-effect, so you remain in full control of what the view
+    returns (redirect, JSON confirmation, rendered page, etc.).
+
+    If no cookie is present nothing breaks — the view still runs as normal.
+
+    Usage:
+        @logout
+        def logout_view(request):
+            return redirect("/login")
+
+        # Or with a JSON confirmation:
+        @logout
+        def logout_view(request):
+            return JsonResponse({"message": "Logged out successfully."})
+    """
+    @wraps(view_func)
+    def wrapped(request, *args, **kwargs):
+        response = view_func(request, *args, **kwargs)
+
+        if request.COOKIES.get("auth_token"):
+            _clear_cookie(response)
+
+        return response
+
+    return wrapped
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CLASS-BASED VIEW MIXINS
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── 4. LoginRequiredMixin ─────────────────────────────────────────────────────
+# ── 5. LoginRequiredMixin ─────────────────────────────────────────────────────
 
 class LoginRequiredMixin:
     """
@@ -227,7 +299,7 @@ class LoginRequiredMixin:
         if not token:
             return JsonResponse({"error": "No token provided."}, status=401)
 
-        result = connector.verify_user_login(token)
+        result = get_connector().verify_user_login(token)
 
         if result is None:
             return JsonResponse({"error": "Invalid or expired token."}, status=401)
@@ -243,7 +315,7 @@ class LoginRequiredMixin:
         return response
 
 
-# ── 5. LoginRequiredRedirectMixin ─────────────────────────────────────────────
+# ── 6. LoginRequiredRedirectMixin ─────────────────────────────────────────────
 
 class LoginRequiredRedirectMixin:
     """
@@ -267,7 +339,7 @@ class LoginRequiredRedirectMixin:
         if not token:
             return redirect(self.login_url)
 
-        result = connector.verify_user_login(token)
+        result = get_connector().verify_user_login(token)
 
         if result is None:
             return redirect(self.login_url)
@@ -283,7 +355,7 @@ class LoginRequiredRedirectMixin:
         return response
 
 
-# ── 6. FetchUserDataMixin ─────────────────────────────────────────────────────
+# ── 7. FetchUserDataMixin ─────────────────────────────────────────────────────
 
 class FetchUserDataMixin:
     """
@@ -309,7 +381,7 @@ class FetchUserDataMixin:
         if not token:
             return JsonResponse({"error": "No token provided."}, status=401)
 
-        result = connector.get_user_data(token)
+        result = get_connector().get_user_data(token)
 
         if result is None:
             return JsonResponse({"error": "Invalid or expired token."}, status=401)
@@ -327,13 +399,38 @@ class FetchUserDataMixin:
         return response
 
 
+# ── 8. LogoutMixin ────────────────────────────────────────────────────────────
+
+class LogoutMixin:
+    """
+    Mixin for class-based views.
+    Clears the auth_token cookie from the response if one is present.
+    The view still executes normally — this mixin only handles the cookie
+    side-effect, so you remain in full control of what the view returns.
+
+    If no cookie is present nothing breaks — the view still runs as normal.
+
+    Usage:
+        class LogoutView(LogoutMixin, View):
+            def get(self, request):
+                return redirect("/login")
+    """
+    def dispatch(self, request, *args, **kwargs):
+        response = super().dispatch(request, *args, **kwargs)
+
+        if request.COOKIES.get("auth_token"):
+            _clear_cookie(response)
+
+        return response
+
+
 # ── Example usage ─────────────────────────────────────────────────────────────
 
 # ── Function-based views ──────────────────────────────────────────────────────
 #
 # from django.http import JsonResponse
 # from django.shortcuts import render
-# from easyauth_django import login_required, login_required_redirect, fetch_user_data, connector
+# from easyauth_django import login_required, login_required_redirect, fetch_user_data, logout, connector
 #
 #
 # # Just gate the route — 401 on failure
@@ -354,6 +451,12 @@ class FetchUserDataMixin:
 #     return JsonResponse({"username": username, "data": user_data})
 #
 #
+# # Clear the auth cookie and redirect to login
+# @logout
+# def logout_view(request):
+#     return redirect("/login")
+#
+#
 # # Write user data inside a view
 # @login_required
 # def onboard(request, token):
@@ -364,7 +467,10 @@ class FetchUserDataMixin:
 # ── Class-based views ─────────────────────────────────────────────────────────
 #
 # from django.views import View
-# from easyauth_django import LoginRequiredMixin, LoginRequiredRedirectMixin, FetchUserDataMixin
+# from easyauth_django import (
+#     LoginRequiredMixin, LoginRequiredRedirectMixin,
+#     FetchUserDataMixin, LogoutMixin,
+# )
 #
 #
 # # Just gate — 401 on failure
@@ -388,3 +494,9 @@ class FetchUserDataMixin:
 #             "username": self.username,
 #             "data":     self.user_data,
 #         })
+#
+#
+# # Clear the auth cookie
+# class LogoutView(LogoutMixin, View):
+#     def get(self, request):
+#         return redirect("/login")

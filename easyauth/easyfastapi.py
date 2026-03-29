@@ -1,18 +1,12 @@
 from fastapi import HTTPException, Request, Response
-from base.easyAuthBaseConnector import LoginConnector
+from easyauth._config import get_connector
 
 
-# ── Initialise your connector once ────────────────────────────────────────────
-
-connector = LoginConnector(
-    username     = "your_username",
-    service_name = "your_service_name",
-    api_key      = "your_api_key",
-    base_url     = "https://easy-auth.dev",   # or http://127.0.0.1:5000 for local
-)
 
 
-# ── Shared helper ─────────────────────────────────────────────────────────────
+
+
+# ── Shared helpers ────────────────────────────────────────────────────────────
 
 def _resolve_token(request: Request):
     """
@@ -44,6 +38,17 @@ def _attach_cookie(response: Response, token: str):
     )
 
 
+def _clear_cookie(response: Response):
+    """Removes the auth_token cookie by expiring it immediately."""
+    response.delete_cookie(
+        key      = "auth_token",
+        httponly = True,
+        secure   = True,
+        samesite = "strict",
+        path     = "/",
+    )
+
+
 # ── 1. login_required ─────────────────────────────────────────────────────────
 
 def login_required(request: Request, response: Response) -> str:
@@ -63,7 +68,7 @@ def login_required(request: Request, response: Response) -> str:
     if not token:
         raise HTTPException(status_code=401, detail="No token provided.")
 
-    result = connector.verify_user_login(token)
+    result = get_connector().verify_user_login(token)
 
     if result is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token.")
@@ -99,7 +104,7 @@ def make_login_required_redirect(redirect_url: str = "/login"):
                 headers     = {"Location": redirect_url},
             )
 
-        result = connector.verify_user_login(token)
+        result = get_connector().verify_user_login(token)
 
         if result is None:
             raise HTTPException(
@@ -154,7 +159,7 @@ def fetch_user_data(request: Request, response: Response) -> UserData:
     if not token:
         raise HTTPException(status_code=401, detail="No token provided.")
 
-    response_data = connector.get_user_data(token)
+    response_data = get_connector().get_user_data(token)
 
     if response_data is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token.")
@@ -169,15 +174,42 @@ def fetch_user_data(request: Request, response: Response) -> UserData:
     )
 
 
-# ── RedirectResponse import is unused — kept for user convenience if needed ──
-# RedirectResponse can be used in routes directly:
-#   return RedirectResponse(url="/login", status_code=303)
+# ── 4. logout ─────────────────────────────────────────────────────────────────
+
+def logout(request: Request, response: Response):
+    """
+    FastAPI dependency that clears the auth_token cookie if one is present.
+    The route still executes normally — this dependency only handles the cookie
+    side-effect, so you remain in full control of what the route returns.
+
+    If no cookie is present nothing breaks — the route still runs as normal.
+
+    Note: unlike Flask/Django where _assert_params catches missing args at
+    startup, FastAPI validates dependency signatures itself at app startup
+    via its dependency injection system — no extra guard needed here.
+
+    Usage:
+        @app.get("/logout")
+        async def logout_view(response: Response, _=Depends(logout)):
+            return RedirectResponse(url="/login", status_code=303)
+
+        # Or with a JSON confirmation:
+        @app.get("/logout")
+        async def logout_view(_=Depends(logout)):
+            return {"message": "Logged out successfully."}
+    """
+    if request.cookies.get("auth_token"):
+        _clear_cookie(response)
 
 
 # ── Example usage ─────────────────────────────────────────────────────────────
 
 # from fastapi import FastAPI, Depends
-# from easyauth_fastapi import login_required, make_login_required_redirect, fetch_user_data, UserData, connector
+# from fastapi.responses import RedirectResponse
+# from easyauth_fastapi import (
+#     login_required, make_login_required_redirect,
+#     fetch_user_data, logout, UserData, connector,
+# )
 #
 # app = FastAPI()
 #
@@ -205,3 +237,9 @@ def fetch_user_data(request: Request, response: Response) -> UserData:
 # async def onboard(user: UserData = Depends(fetch_user_data)):
 #     connector.send_or_update_user_data(user.token, {"onboarded": True, "plan": "free"})
 #     return {"status": "saved"}
+#
+#
+# # Clear the auth cookie
+# @app.get("/logout")
+# async def logout_view(_=Depends(logout)):
+#     return RedirectResponse(url="/login", status_code=303)

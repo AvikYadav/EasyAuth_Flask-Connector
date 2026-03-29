@@ -1,16 +1,35 @@
+import inspect
 from functools import wraps
 from flask import request, jsonify, redirect, make_response
-from base.easyAuthBaseConnector import LoginConnector
+from easyauth._config import get_connector
 
 
-# ── Initialise your connector once ────────────────────────────────────────────
+# ── Signature guard ───────────────────────────────────────────────────────────
 
-connector = LoginConnector(
-    username     = "your_username",
-    service_name = "your_service_name",
-    api_key      = "your_api_key",
-    base_url     = "https://easy-auth.dev",
-)
+def _assert_params(func, required: list[str], decorator_name: str):
+    """
+    Raises a clear TypeError at decoration time if `func` is missing any of
+    the parameter names that the decorator will inject at request time.
+
+    Args:
+        func           : The route function being decorated.
+        required       : Parameter names the decorator will inject.
+        decorator_name : Name used in the error message.
+    """
+    actual  = inspect.signature(func).parameters
+    missing = [p for p in required if p not in actual]
+    if missing:
+        missing_str = ", ".join(missing)
+        params_str  = ", ".join(required)
+        raise TypeError(
+            f"\n\n  @{decorator_name} on '{func.__name__}' is missing required parameter(s): {missing_str}\n"
+            f"  Fix: add them to your function signature.\n\n"
+            f"  def {func.__name__}({params_str}):\n"
+            f"      ..."
+        )
+
+
+
 
 
 # ── Shared helper ─────────────────────────────────────────────────────────────
@@ -46,6 +65,18 @@ def _attach_cookie(response, token):
     return response
 
 
+def _clear_cookie(response):
+    """Removes the auth_token cookie by expiring it immediately."""
+    response.delete_cookie(
+        "auth_token",
+        httponly=True,
+        secure=True,
+        samesite="Strict",
+        path="/",
+    )
+    return response
+
+
 # ── 1. @login_required ────────────────────────────────────────────────────────
 
 def login_required(f):
@@ -63,6 +94,8 @@ def login_required(f):
         def dashboard(token):
             return jsonify({"token": token})
     """
+    _assert_params(f, ["token"], "login_required")
+
     @wraps(f)
     def decorated(*args, **kwargs):
         token, from_url = _resolve_token()
@@ -70,7 +103,7 @@ def login_required(f):
         if not token:
             return jsonify({"error": "No token provided."}), 401
 
-        result = connector.verify_user_login(token)
+        result = get_connector().verify_user_login(token)
 
         if result is None:
             return jsonify({"error": "Invalid or expired token."}), 401
@@ -101,6 +134,8 @@ def login_required_redirect(redirect_url="/login"):
             return render_template("dashboard.html", token=token)
     """
     def decorator(f):
+        _assert_params(f, ["token"], "login_required_redirect")
+
         @wraps(f)
         def decorated(*args, **kwargs):
             token, from_url = _resolve_token()
@@ -108,7 +143,7 @@ def login_required_redirect(redirect_url="/login"):
             if not token:
                 return redirect(redirect_url)
 
-            result = connector.verify_user_login(token)
+            result = get_connector().verify_user_login(token)
 
             if result is None:
                 return redirect(redirect_url)
@@ -141,6 +176,8 @@ def fetch_user_data(f):
         def profile(username, user_data, token):
             return jsonify({"username": username, "data": user_data})
     """
+    _assert_params(f, ["token", "username", "user_data"], "fetch_user_data")
+
     @wraps(f)
     def decorated(*args, **kwargs):
         token, from_url = _resolve_token()
@@ -148,7 +185,7 @@ def fetch_user_data(f):
         if not token:
             return jsonify({"error": "No token provided."}), 401
 
-        result = connector.get_user_data(token)
+        result = get_connector().get_user_data(token)
 
         if result is None:
             return jsonify({"error": "Invalid or expired token."}), 401
@@ -166,10 +203,45 @@ def fetch_user_data(f):
     return decorated
 
 
+# ── 4. @logout ────────────────────────────────────────────────────────────────
+
+def logout(f):
+    """
+    Clears the auth_token cookie from the response if one is present.
+    The decorated route still executes normally — this decorator only handles
+    the cookie side-effect, so you remain in full control of what the route
+    returns (redirect, JSON confirmation, rendered page, etc.).
+
+    If no cookie is present nothing breaks — the route still runs as normal.
+
+    Usage:
+        @app.route("/logout")
+        @logout
+        def logout_view():
+            return redirect("/login")
+
+        # Or with a JSON confirmation:
+        @app.route("/logout")
+        @logout
+        def logout_view():
+            return jsonify({"message": "Logged out successfully."})
+    """
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        response = make_response(f(*args, **kwargs))
+
+        if request.cookies.get("auth_token"):
+            _clear_cookie(response)
+
+        return response
+
+    return decorated
+
+
 # ── Example usage ─────────────────────────────────────────────────────────────
 
 # from flask import Flask, render_template
-# from auth_decorator import login_required, login_required_redirect, fetch_user_data
+# from auth_decorator import login_required, login_required_redirect, fetch_user_data, logout
 #
 # app = Flask(__name__)
 #
@@ -193,4 +265,10 @@ def fetch_user_data(f):
 # @fetch_user_data
 # def profile(username, user_data, token):
 #     return jsonify({"username": username, "data": user_data})
-
+#
+#
+# # Clear the auth cookie and redirect to login
+# @app.route("/logout")
+# @logout
+# def logout_view():
+#     return redirect("/login")
