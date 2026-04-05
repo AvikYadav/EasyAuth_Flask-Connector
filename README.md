@@ -6,7 +6,7 @@ auth made so easyyyy
 Most auth setups take hours — JWT libraries, cookie logic, session management, login pages, token verification on every route. `easyauth` replaces all of it with a single pip install and three lines of configuration.
 
 ```bash
-pip install easyauth-sdk
+pip install easy-auth-sdk
 ```
 
 ---
